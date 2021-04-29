@@ -12,11 +12,11 @@ import torch.nn.functional as F
 from torch.distributions.bernoulli import Bernoulli
 
 from distributions import Normal, DiscMixLogistic
-from neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
-from neural_ar_operations import ELUConv as ARELUConv
-from neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
-from thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
-from utils import get_stride_for_cell_type, get_input_size, groups_per_scale
+from .neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
+from .neural_ar_operations import ELUConv as ARELUConv
+from .neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
+from .utils import get_stride_for_cell_type, get_input_size, groups_per_scale
+from ..thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 CHANNEL_MULT = 2
 
@@ -45,6 +45,7 @@ class Cell(nn.Module):
     def forward(self, s):
         # skip branch
         skip = self.skip(s)
+
         for i in range(self._num_nodes):
             s = self._ops[i](s)
 

@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from neural_operations import normalize_weight_jit
+from .neural_operations import normalize_weight_jit
 
 AROPS = OrderedDict([
     ('conv_3x3', lambda C, masked, zero_diag: ELUConv(C, C, 3, 1, 1, masked=masked, zero_diag=zero_diag))
