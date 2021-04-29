@@ -7,3 +7,4 @@ tensorboardX~=2.2
 lmdb~=1.2.1
 tfrecord~=1.13
 numpy~=1.20.2
+pandas
