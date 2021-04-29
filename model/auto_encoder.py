@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.bernoulli import Bernoulli
 
+from configs import NVAEConfig
 from distributions import Normal, DiscMixLogistic
 from .cell import Cell, PairedCellAR
 from .neural_ar_operations import ARConv2d
@@ -22,42 +23,21 @@ CHANNEL_MULT = 2
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, args, writer, arch_instance):
+    def __init__(self, config: NVAEConfig, writer, arch_instance):
         super(AutoEncoder, self).__init__()
         self.writer = writer
         self.arch_instance = arch_instance
-        self.dataset = args.dataset
-        self.crop_output = self.dataset == 'mnist'
-        self.use_se = args.use_se
-        self.res_dist = args.res_dist
-        self.num_bits = args.num_x_bits
+        self.config = config
+        self.crop_output = self.config.dataset == "mnist"
 
-        self.num_latent_scales = args.num_latent_scales  # number of spatial scales that latent layers will reside
-        self.num_groups_per_scale = args.num_groups_per_scale  # number of groups of latent vars. per scale
-        self.num_latent_per_group = args.num_latent_per_group  # number of latent vars. per group
-        self.groups_per_scale = groups_per_scale(self.num_latent_scales, self.num_groups_per_scale, args.ada_groups,
-                                                 minimum_groups=args.min_groups_per_scale)
+        self.groups_per_scale = groups_per_scale(self.config.n_latent_scales, self.config.n_groups_per_scale,
+                                                 self.config.ada_groups,
+                                                 minimum_groups=self.config.min_groups_per_scale)
 
-        self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
-
-        # encoder parameteres
-        self.num_channels_enc = args.num_channels_enc
-        self.num_channels_dec = args.num_channels_dec
-        self.num_preprocess_blocks = args.num_preprocess_blocks  # block is defined as series of Normal followed by Down
-        self.num_preprocess_cells = args.num_preprocess_cells  # number of cells per block
-        self.num_cell_per_cond_enc = args.num_cell_per_cond_enc  # number of cell for each conditional in encoder
-
-        # decoder parameters
-        # self.num_channels_dec = args.num_channels_dec
-        self.num_postprocess_blocks = args.num_postprocess_blocks
-        self.num_postprocess_cells = args.num_postprocess_cells
-        self.num_cell_per_cond_dec = args.num_cell_per_cond_dec  # number of cell for each conditional in decoder
+        self.vanilla_vae = self.config.n_latent_scales == 1 and self.config.n_groups_per_scale == 1
 
         # general cell parameters
         self.input_size = get_input_size(self.dataset)
-
-        # decoder param
-        self.num_mix_output = 10
 
         # used for generative purpose
         c_scaling = CHANNEL_MULT ** (self.num_preprocess_blocks + self.num_latent_scales - 1)
