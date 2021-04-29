@@ -32,11 +32,12 @@ OPS = OrderedDict([
 
 def get_skip_connection(C, stride, affine, channel_mult):
     if stride == 1:
-        return Identity()
+        return nn.Identity()
     elif stride == 2:
         return FactorizedReduce(C, int(channel_mult * C))
     elif stride == -1:
-        return nn.Sequential(UpSample(), Conv2D(C, int(C / channel_mult), kernel_size=1))
+        return nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+                             Conv2D(C, int(C / channel_mult), kernel_size=1))
 
 
 def norm(t, dim):
@@ -50,14 +51,6 @@ def logit(t):
 def act(t):
     # The following implementation has lower memory.
     return SwishFN.apply(t)
-
-
-class Swish(nn.Module):
-    def __init__(self):
-        super(Swish, self).__init__()
-
-    def forward(self, x):
-        return act(x)
 
 
 @torch.jit.script
@@ -228,15 +221,6 @@ class FactorizedReduce(nn.Module):
         conv4 = self.conv_4(out[:, :, 1:, :])
         out = torch.cat([conv1, conv2, conv3, conv4], dim=1)
         return out
-
-
-class UpSample(nn.Module):
-    def __init__(self):
-        super(UpSample, self).__init__()
-        pass
-
-    def forward(self, x):
-        return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
 
 
 class EncCombinerCell(nn.Module):
