@@ -5,14 +5,14 @@
 # for NVAE. To view a copy of this license, see the LICENSE file.
 # ---------------------------------------------------------------
 
+from collections import OrderedDict
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-import numpy as np
-from collections import OrderedDict
 
-from neural_operations import ConvBNSwish, normalize_weight_jit
+from neural_operations import normalize_weight_jit
 
 AROPS = OrderedDict([
     ('conv_3x3', lambda C, masked, zero_diag: ELUConv(C, C, 3, 1, 1, masked=masked, zero_diag=zero_diag))
@@ -148,7 +148,7 @@ class ARInvertedResidual(nn.Module):
                        nn.ELU(inplace=True)])
         layers.extend([ARConv2d(hidden_dim, hidden_dim, groups=hidden_dim, kernel_size=k, padding=padding, dilation=dil,
                                 masked=True, mirror=mirror, zero_diag=False),
-                      nn.ELU(inplace=True)])
+                       nn.ELU(inplace=True)])
         self.convz = nn.Sequential(*layers)
         self.hidden_dim = hidden_dim
 
@@ -170,7 +170,7 @@ class MixLogCDFParam(nn.Module):
     def forward(self, ftr):
         out = self.conv(ftr)
         b, c, h, w = out.size()
-        out = out.view(b, self.num_z, c // self.num_z,  h, w)
+        out = out.view(b, self.num_z, c // self.num_z, h, w)
         m = self.num_mix
         logit_pi, mu, log_s, log_a, b, _ = torch.split(out, [m, m, m, 1, 1, 1], dim=2)  # the last one is dummy
         return logit_pi, mu, log_s, log_a, b

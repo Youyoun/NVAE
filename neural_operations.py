@@ -5,15 +5,15 @@
 # for NVAE. To view a copy of this license, see the LICENSE file.
 # ---------------------------------------------------------------
 
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from thirdparty.swish import Swish as SwishFN
 from thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
-
+from thirdparty.swish import Swish as SwishFN
 from utils import average_tensor
-from collections import OrderedDict
 
 BN_EPS = 1e-5
 SYNC_BN = True
@@ -59,10 +59,11 @@ class Swish(nn.Module):
     def forward(self, x):
         return act(x)
 
+
 @torch.jit.script
 def normalize_weight_jit(log_weight_norm, weight):
     n = torch.exp(log_weight_norm)
-    wn = torch.sqrt(torch.sum(weight * weight, dim=[1, 2, 3]))   # norm(w)
+    wn = torch.sqrt(torch.sum(weight * weight, dim=[1, 2, 3]))  # norm(w)
     weight = n * weight / (wn.view(-1, 1, 1, 1) + 1e-5)
     return weight
 
@@ -208,7 +209,6 @@ class BNSwishConv(nn.Module):
             out = F.interpolate(out, scale_factor=2, mode='nearest')
         out = self.conv_0(out)
         return out
-
 
 
 class FactorizedReduce(nn.Module):

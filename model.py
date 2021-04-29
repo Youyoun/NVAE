@@ -6,19 +6,17 @@
 # ---------------------------------------------------------------
 
 
-import time
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
-from neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
-from neural_ar_operations import ELUConv as ARELUConv
 from torch.distributions.bernoulli import Bernoulli
 
-from utils import get_stride_for_cell_type, get_input_size, groups_per_scale
 from distributions import Normal, DiscMixLogistic
+from neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
+from neural_ar_operations import ELUConv as ARELUConv
+from neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
 from thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
+from utils import get_stride_for_cell_type, get_input_size, groups_per_scale
 
 CHANNEL_MULT = 2
 
@@ -112,9 +110,9 @@ class AutoEncoder(nn.Module):
         self.res_dist = args.res_dist
         self.num_bits = args.num_x_bits
 
-        self.num_latent_scales = args.num_latent_scales         # number of spatial scales that latent layers will reside
-        self.num_groups_per_scale = args.num_groups_per_scale   # number of groups of latent vars. per scale
-        self.num_latent_per_group = args.num_latent_per_group   # number of latent vars. per group
+        self.num_latent_scales = args.num_latent_scales  # number of spatial scales that latent layers will reside
+        self.num_groups_per_scale = args.num_groups_per_scale  # number of groups of latent vars. per scale
+        self.num_latent_per_group = args.num_latent_per_group  # number of latent vars. per group
         self.groups_per_scale = groups_per_scale(self.num_latent_scales, self.num_groups_per_scale, args.ada_groups,
                                                  minimum_groups=args.min_groups_per_scale)
 
@@ -124,7 +122,7 @@ class AutoEncoder(nn.Module):
         self.num_channels_enc = args.num_channels_enc
         self.num_channels_dec = args.num_channels_dec
         self.num_preprocess_blocks = args.num_preprocess_blocks  # block is defined as series of Normal followed by Down
-        self.num_preprocess_cells = args.num_preprocess_cells   # number of cells per block
+        self.num_preprocess_cells = args.num_preprocess_cells  # number of cells per block
         self.num_cell_per_cond_enc = args.num_cell_per_cond_enc  # number of cell for each conditional in encoder
 
         # decoder parameters
@@ -145,7 +143,8 @@ class AutoEncoder(nn.Module):
         prior_ftr0_size = (int(c_scaling * self.num_channels_dec), self.input_size // spatial_scaling,
                            self.input_size // spatial_scaling)
         self.prior_ftr0 = nn.Parameter(torch.rand(size=prior_ftr0_size), requires_grad=True)
-        self.z0_size = [self.num_latent_per_group, self.input_size // spatial_scaling, self.input_size // spatial_scaling]
+        self.z0_size = [self.num_latent_per_group, self.input_size // spatial_scaling,
+                        self.input_size // spatial_scaling]
 
         self.stem = self.init_stem()
         self.pre_process, mult = self.init_pre_process(mult=1)
@@ -352,10 +351,10 @@ class AutoEncoder(nn.Module):
         combiner_cells_s.reverse()
 
         idx_dec = 0
-        ftr = self.enc0(s)                            # this reduces the channel dimension
+        ftr = self.enc0(s)  # this reduces the channel dimension
         param0 = self.enc_sampler[idx_dec](ftr)
         mu_q, log_sig_q = torch.chunk(param0, 2, dim=1)
-        dist = Normal(mu_q, log_sig_q)   # for the first approx. posterior
+        dist = Normal(mu_q, log_sig_q)  # for the first approx. posterior
         z, _ = dist.sample()
         log_q_conv = dist.log_p(z)
 
@@ -489,7 +488,7 @@ class AutoEncoder(nn.Module):
         """ This method computes spectral normalization for all conv layers in parallel. This method should be called
          after calling the forward method of all the conv layers in each iteration. """
 
-        weights = {}   # a dictionary indexed by the shape of weights
+        weights = {}  # a dictionary indexed by the shape of weights
         for l in self.all_conv_layers:
             weight = l.weight_normalized
             weight_mat = weight.view(weight.size(0), -1)

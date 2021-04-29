@@ -6,19 +6,18 @@
 # ---------------------------------------------------------------
 
 import argparse
-import torch
-import torch.nn as nn
-import numpy as np
 import os
 
+import numpy as np
+import torch
 import torch.distributed as dist
-from torch.multiprocessing import Process
 from torch.cuda.amp import autocast, GradScaler
+from torch.multiprocessing import Process
 
+import datasets
+import utils
 from model import AutoEncoder
 from thirdparty.adamax import Adamax
-import utils
-import datasets
 
 
 def main(args):
@@ -56,7 +55,7 @@ def main(args):
 
     cnn_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         cnn_optimizer, float(args.epochs - args.warmup_epochs - 1), eta_min=args.learning_rate_min)
-    grad_scalar = GradScaler(2**10)
+    grad_scalar = GradScaler(2 ** 10)
 
     num_output = utils.num_output(args.dataset)
     bpd_coeff = 1. / np.log(2.) / num_output
@@ -89,7 +88,8 @@ def main(args):
         logging.info('epoch %d', epoch)
 
         # Training.
-        train_nelbo, global_step = train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters, writer, logging)
+        train_nelbo, global_step = train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters,
+                                         writer, logging)
         logging.info('train_nelbo %f', train_nelbo)
         writer.add_scalar('train/nelbo', train_nelbo, global_step)
 
@@ -103,7 +103,9 @@ def main(args):
                 for t in [0.7, 0.8, 0.9, 1.0]:
                     logits = model.sample(num_samples, t)
                     output = model.decoder_output(logits)
-                    output_img = output.mean if isinstance(output, torch.distributions.bernoulli.Bernoulli) else output.sample(t)
+                    output_img = output.mean if isinstance(output,
+                                                           torch.distributions.bernoulli.Bernoulli) else output.sample(
+                        t)
                     output_tiled = utils.tile_image(output_img, n)
                     writer.add_image('generated_%0.1f' % t, output_tiled, global_step)
 
@@ -177,7 +179,8 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             # get spectral regularization coefficient (lambda)
             if args.weight_decay_norm_anneal:
                 assert args.weight_decay_norm_init > 0 and args.weight_decay_norm > 0, 'init and final wdn should be positive.'
-                wdn_coeff = (1. - kl_coeff) * np.log(args.weight_decay_norm_init) + kl_coeff * np.log(args.weight_decay_norm)
+                wdn_coeff = (1. - kl_coeff) * np.log(args.weight_decay_norm_init) + kl_coeff * np.log(
+                    args.weight_decay_norm)
                 wdn_coeff = np.exp(wdn_coeff)
             else:
                 wdn_coeff = args.weight_decay_norm
@@ -193,9 +196,10 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
         if (global_step + 1) % 100 == 0:
             if (global_step + 1) % 1000 == 0:  # reduced frequency
                 n = int(np.floor(np.sqrt(x.size(0))))
-                x_img = x[:n*n]
-                output_img = output.mean if isinstance(output, torch.distributions.bernoulli.Bernoulli) else output.sample()
-                output_img = output_img[:n*n]
+                x_img = x[:n * n]
+                output_img = output.mean if isinstance(output,
+                                                       torch.distributions.bernoulli.Bernoulli) else output.sample()
+                output_img = output_img[:n * n]
                 x_tiled = utils.tile_image(x_img, n)
                 output_tiled = utils.tile_image(output_img, n)
                 in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
@@ -210,10 +214,11 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             logging.info('train %d %f', global_step, nelbo.avg)
             writer.add_scalar('train/nelbo_avg', nelbo.avg, global_step)
             writer.add_scalar('train/lr', cnn_optimizer.state_dict()[
-                              'param_groups'][0]['lr'], global_step)
+                'param_groups'][0]['lr'], global_step)
             writer.add_scalar('train/nelbo_iter', loss, global_step)
             writer.add_scalar('train/kl_iter', torch.mean(sum(kl_all)), global_step)
-            writer.add_scalar('train/recon_iter', torch.mean(utils.reconstruction_loss(output, x, crop=model.crop_output)), global_step)
+            writer.add_scalar('train/recon_iter',
+                              torch.mean(utils.reconstruction_loss(output, x, crop=model.crop_output)), global_step)
             writer.add_scalar('kl_coeff/coeff', kl_coeff, global_step)
             total_active = 0
             for i, kl_diag_i in enumerate(kl_diag):
@@ -413,5 +418,3 @@ if __name__ == '__main__':
         print('starting in debug mode')
         args.distributed = True
         init_processes(0, size, main, args)
-
-

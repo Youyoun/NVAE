@@ -10,8 +10,7 @@
 import torch
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
-import os
-import utils
+
 from lmdb_datasets import LMDBDataset
 from thirdparty.lsun import LSUN
 
@@ -19,6 +18,7 @@ from thirdparty.lsun import LSUN
 class Binarize(object):
     """ This class introduces a binarization transformation
     """
+
     def __call__(self, pic):
         return torch.Tensor(pic.size()).bernoulli_(pic)
 
@@ -30,6 +30,7 @@ class CropCelebA64(object):
     """ This class applies cropping for CelebA64. This is a simplified implementation of:
     https://github.com/andersbll/autoencoding_beyond_pixels/blob/master/dataset/celeba.py
     """
+
     def __call__(self, pic):
         new_pic = pic.crop((15, 40, 178 - 15, 218 - 30))
         return new_pic
@@ -65,8 +66,10 @@ def get_loaders_eval(dataset, args):
             resize = 64
             num_classes = 40
             train_transform, valid_transform = _data_transforms_celeba64(resize)
-            train_data = LMDBDataset(root=args.data, name='celeba64', train=True, transform=train_transform, is_encoded=True)
-            valid_data = LMDBDataset(root=args.data, name='celeba64', train=False, transform=valid_transform, is_encoded=True)
+            train_data = LMDBDataset(root=args.data, name='celeba64', train=True, transform=train_transform,
+                                     is_encoded=True)
+            valid_data = LMDBDataset(root=args.data, name='celeba64', train=False, transform=valid_transform,
+                                     is_encoded=True)
         elif dataset in {'celeba_256'}:
             num_classes = 1
             resize = int(dataset.split('_')[1])

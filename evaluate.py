@@ -6,17 +6,17 @@
 # ---------------------------------------------------------------
 
 import argparse
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
 from time import time
 
-from torch.multiprocessing import Process
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 from torch.cuda.amp import autocast
+from torch.multiprocessing import Process
 
-from model import AutoEncoder
-import utils
 import datasets
+import utils
+from model import AutoEncoder
 from train import test, init_processes
 
 
@@ -28,7 +28,7 @@ def set_bn(model, bn_eval_mode, num_samples=1, t=1.0, iter=100):
         with autocast():
             for i in range(iter):
                 if i % 10 == 0:
-                    print('setting BN statistics iter %d out of %d' % (i+1, iter))
+                    print('setting BN statistics iter %d out of %d' % (i + 1, iter))
                 model.sample(num_samples, t)
         model.eval()
 
@@ -81,7 +81,8 @@ def main(eval_args):
         num_output = utils.num_output(args.dataset)
         bpd_coeff = 1. / np.log(2.) / num_output
 
-        valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=eval_args.num_iw_samples, args=args, logging=logging)
+        valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=eval_args.num_iw_samples, args=args,
+                                            logging=logging)
         logging.info('final valid nelbo %f', valid_nelbo)
         logging.info('final valid neg log p %f', valid_neg_log_p)
         logging.info('final valid nelbo in bpd %f', valid_nelbo * bpd_coeff)
@@ -93,7 +94,7 @@ def main(eval_args):
         with torch.no_grad():
             n = int(np.floor(np.sqrt(num_samples)))
             set_bn(model, bn_eval_mode, num_samples=36, t=eval_args.temp, iter=500)
-            for ind in range(10):     # sampling is repeated.
+            for ind in range(10):  # sampling is repeated.
                 torch.cuda.synchronize()
                 start = time()
                 with autocast():
