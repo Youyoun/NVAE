@@ -28,5 +28,7 @@ class NVAEConfig:
     dataset: str
     use_se: bool
     res_dist: int
-    encider: EncoderConfig
+    num_nf: int
+    n_bits: int
+    encoder: EncoderConfig
     decoder: DecoderConfig

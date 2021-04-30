@@ -35,15 +35,15 @@ class AutoEncoder(nn.Module):
         self.vanilla_vae = self.config.n_latent_scales == 1 and self.config.n_groups_per_scale == 1
 
         # general cell parameters
-        self.input_size = get_input_size(self.dataset)
+        self.input_size = get_input_size(self.config.dataset)
 
         # used for generative purpose
-        c_scaling = CHANNEL_MULT ** (self.num_preprocess_blocks + self.num_latent_scales - 1)
-        spatial_scaling = 2 ** (self.num_preprocess_blocks + self.num_latent_scales - 1)
-        prior_ftr0_size = (int(c_scaling * self.num_channels_dec), self.input_size // spatial_scaling,
+        c_scaling = CHANNEL_MULT ** (self.config.encoder.n_preprocess_blocks + self.config.n_latent_scales - 1)
+        spatial_scaling = 2 ** (self.config.encoder.n_preprocess_blocks + self.config.n_latent_scales - 1)
+        prior_ftr0_size = (int(c_scaling * self.config.decoder.n_channels), self.input_size // spatial_scaling,
                            self.input_size // spatial_scaling)
         self.prior_ftr0 = nn.Parameter(torch.rand(size=prior_ftr0_size), requires_grad=True)
-        self.z0_size = [self.num_latent_per_group, self.input_size // spatial_scaling,
+        self.z0_size = [self.config.n_latent_per_group, self.input_size // spatial_scaling,
                         self.input_size // spatial_scaling]
 
         self.stem = self.init_stem()
@@ -54,8 +54,8 @@ class AutoEncoder(nn.Module):
         else:
             self.enc_tower, mult = self.init_encoder_tower(mult)
 
-        self.with_nf = args.num_nf > 0
-        self.num_flows = args.num_nf
+        self.with_nf = self.config.num_nf > 0
+        self.num_flows = self.config.num_nf
 
         self.enc0 = self.init_encoder0(mult)
         self.enc_sampler, self.dec_sampler, self.nf_cells, self.enc_kv, self.dec_kv, self.query = \
@@ -63,7 +63,8 @@ class AutoEncoder(nn.Module):
 
         if self.vanilla_vae:
             self.dec_tower = []
-            self.stem_decoder = Conv2D(self.num_latent_per_group, mult * self.num_channels_enc, (1, 1), bias=True)
+            self.stem_decoder = Conv2D(self.config.n_latent_per_group, mult * self.config.encoder.n_channels, (1, 1),
+                                       bias=True)
         else:
             self.dec_tower, mult = self.init_decoder_tower(mult)
 
@@ -92,25 +93,25 @@ class AutoEncoder(nn.Module):
         self.num_power_iter = 4
 
     def init_stem(self):
-        Cout = self.num_channels_enc
-        Cin = 1 if self.dataset == 'mnist' else 3
+        Cout = self.config.encoder.n_channels
+        Cin = 1 if self.config.dataset == 'mnist' else 3
         stem = Conv2D(Cin, Cout, 3, padding=1, bias=True)
         return stem
 
     def init_pre_process(self, mult):
         pre_process = nn.ModuleList()
-        for b in range(self.num_preprocess_blocks):
-            for c in range(self.num_preprocess_cells):
-                if c == self.num_preprocess_cells - 1:
+        for b in range(self.config.encoder.n_preprocess_blocks):
+            for c in range(self.config.encoder.n_preprocess_cells):
+                if c == self.config.encoder.n_preprocess_cells - 1:
                     arch = self.arch_instance['down_pre']
-                    num_ci = int(self.num_channels_enc * mult)
+                    num_ci = int(self.config.encoder.n_channels * mult)
                     num_co = int(CHANNEL_MULT * num_ci)
-                    cell = Cell(num_ci, num_co, cell_type='down_pre', arch=arch, use_se=self.use_se)
+                    cell = Cell(num_ci, num_co, cell_type='down_pre', arch=arch, use_se=self.config.use_se)
                     mult = CHANNEL_MULT * mult
                 else:
                     arch = self.arch_instance['normal_pre']
-                    num_c = self.num_channels_enc * mult
-                    cell = Cell(num_c, num_c, cell_type='normal_pre', arch=arch, use_se=self.use_se)
+                    num_c = self.config.encoder.n_channels * mult
+                    cell = Cell(num_c, num_c, cell_type='normal_pre', arch=arch, use_se=self.config.use_se)
 
                 pre_process.append(cell)
 
@@ -118,34 +119,34 @@ class AutoEncoder(nn.Module):
 
     def init_encoder_tower(self, mult):
         enc_tower = nn.ModuleList()
-        for s in range(self.num_latent_scales):
+        for s in range(self.config.n_latent_scales):
             for g in range(self.groups_per_scale[s]):
-                for c in range(self.num_cell_per_cond_enc):
+                for c in range(self.config.encoder.n_cell_per_cond):
                     arch = self.arch_instance['normal_enc']
-                    num_c = int(self.num_channels_enc * mult)
-                    cell = Cell(num_c, num_c, cell_type='normal_enc', arch=arch, use_se=self.use_se)
+                    num_c = int(self.config.encoder.n_channels * mult)
+                    cell = Cell(num_c, num_c, cell_type='normal_enc', arch=arch, use_se=self.config.use_se)
                     enc_tower.append(cell)
 
                 # add encoder combiner
-                if not (s == self.num_latent_scales - 1 and g == self.groups_per_scale[s] - 1):
-                    num_ce = int(self.num_channels_enc * mult)
-                    num_cd = int(self.num_channels_dec * mult)
+                if not (s == self.config.n_latent_scales - 1 and g == self.groups_per_scale[s] - 1):
+                    num_ce = int(self.config.encoder.n_channels * mult)
+                    num_cd = int(self.config.decoder.n_channels * mult)
                     cell = EncCombinerCell(num_ce, num_cd, num_ce, cell_type='combiner_enc')
                     enc_tower.append(cell)
 
             # down cells after finishing a scale
-            if s < self.num_latent_scales - 1:
+            if s < self.config.n_latent_scales - 1:
                 arch = self.arch_instance['down_enc']
-                num_ci = int(self.num_channels_enc * mult)
+                num_ci = int(self.config.encoder.n_channels * mult)
                 num_co = int(CHANNEL_MULT * num_ci)
-                cell = Cell(num_ci, num_co, cell_type='down_enc', arch=arch, use_se=self.use_se)
+                cell = Cell(num_ci, num_co, cell_type='down_enc', arch=arch, use_se=self.config.use_se)
                 enc_tower.append(cell)
                 mult = CHANNEL_MULT * mult
 
         return enc_tower, mult
 
     def init_encoder0(self, mult):
-        num_c = int(self.num_channels_enc * mult)
+        num_c = int(self.config.encoder.n_channels * mult)
         cell = nn.Sequential(
             nn.ELU(),
             Conv2D(num_c, num_c, kernel_size=1, bias=True),
@@ -155,23 +156,23 @@ class AutoEncoder(nn.Module):
     def init_normal_sampler(self, mult):
         enc_sampler, dec_sampler, nf_cells = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
         enc_kv, dec_kv, query = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
-        for s in range(self.num_latent_scales):
-            for g in range(self.groups_per_scale[self.num_latent_scales - s - 1]):
+        for s in range(self.config.n_latent_scales):
+            for g in range(self.groups_per_scale[self.config.n_latent_scales - s - 1]):
                 # build mu, sigma generator for encoder
-                num_c = int(self.num_channels_enc * mult)
-                cell = Conv2D(num_c, 2 * self.num_latent_per_group, kernel_size=3, padding=1, bias=True)
+                num_c = int(self.config.encoder.n_channels * mult)
+                cell = Conv2D(num_c, 2 * self.config.n_latent_per_group, kernel_size=3, padding=1, bias=True)
                 enc_sampler.append(cell)
                 # build NF
                 for n in range(self.num_flows):
                     arch = self.arch_instance['ar_nn']
-                    num_c1 = int(self.num_channels_enc * mult)
-                    num_c2 = 8 * self.num_latent_per_group  # use 8x features
-                    nf_cells.append(PairedCellAR(self.num_latent_per_group, num_c1, num_c2, arch))
+                    num_c1 = int(self.config.encoder.n_channels * mult)
+                    num_c2 = 8 * self.config.n_latent_per_group  # use 8x features
+                    nf_cells.append(PairedCellAR(self.config.n_latent_per_group, num_c1, num_c2, arch))
                 if not (s == 0 and g == 0):  # for the first group, we use a fixed standard Normal.
-                    num_c = int(self.num_channels_dec * mult)
+                    num_c = int(self.config.decoder.n_channels * mult)
                     cell = nn.Sequential(
                         nn.ELU(),
-                        Conv2D(num_c, 2 * self.num_latent_per_group, kernel_size=1, padding=0, bias=True))
+                        Conv2D(num_c, 2 * self.config.n_latent_per_group, kernel_size=1, padding=0, bias=True))
                     dec_sampler.append(cell)
 
             mult = mult / CHANNEL_MULT
@@ -181,24 +182,24 @@ class AutoEncoder(nn.Module):
     def init_decoder_tower(self, mult):
         # create decoder tower
         dec_tower = nn.ModuleList()
-        for s in range(self.num_latent_scales):
-            for g in range(self.groups_per_scale[self.num_latent_scales - s - 1]):
-                num_c = int(self.num_channels_dec * mult)
+        for s in range(self.config.n_latent_scales):
+            for g in range(self.groups_per_scale[self.config.n_latent_scales - s - 1]):
+                num_c = int(self.config.decoder.n_channels * mult)
                 if not (s == 0 and g == 0):
-                    for c in range(self.num_cell_per_cond_dec):
+                    for c in range(self.config.decoder.n_cell_per_cond):
                         arch = self.arch_instance['normal_dec']
-                        cell = Cell(num_c, num_c, cell_type='normal_dec', arch=arch, use_se=self.use_se)
+                        cell = Cell(num_c, num_c, cell_type='normal_dec', arch=arch, use_se=self.config.use_se)
                         dec_tower.append(cell)
 
-                cell = DecCombinerCell(num_c, self.num_latent_per_group, num_c, cell_type='combiner_dec')
+                cell = DecCombinerCell(num_c, self.config.n_latent_per_group, num_c, cell_type='combiner_dec')
                 dec_tower.append(cell)
 
             # down cells after finishing a scale
-            if s < self.num_latent_scales - 1:
+            if s < self.config.n_latent_scales - 1:
                 arch = self.arch_instance['up_dec']
-                num_ci = int(self.num_channels_dec * mult)
+                num_ci = int(self.config.decoder.n_channels * mult)
                 num_co = int(num_ci / CHANNEL_MULT)
-                cell = Cell(num_ci, num_co, cell_type='up_dec', arch=arch, use_se=self.use_se)
+                cell = Cell(num_ci, num_co, cell_type='up_dec', arch=arch, use_se=self.config.use_se)
                 dec_tower.append(cell)
                 mult = mult / CHANNEL_MULT
 
@@ -206,26 +207,26 @@ class AutoEncoder(nn.Module):
 
     def init_post_process(self, mult):
         post_process = nn.ModuleList()
-        for b in range(self.num_postprocess_blocks):
-            for c in range(self.num_postprocess_cells):
+        for b in range(self.config.decoder.n_postprocess_blocks):
+            for c in range(self.config.decoder.n_postprocess_cells):
                 if c == 0:
                     arch = self.arch_instance['up_post']
-                    num_ci = int(self.num_channels_dec * mult)
+                    num_ci = int(self.config.decoder.n_channels * mult)
                     num_co = int(num_ci / CHANNEL_MULT)
-                    cell = Cell(num_ci, num_co, cell_type='up_post', arch=arch, use_se=self.use_se)
+                    cell = Cell(num_ci, num_co, cell_type='up_post', arch=arch, use_se=self.config.use_se)
                     mult = mult / CHANNEL_MULT
                 else:
                     arch = self.arch_instance['normal_post']
-                    num_c = int(self.num_channels_dec * mult)
-                    cell = Cell(num_c, num_c, cell_type='normal_post', arch=arch, use_se=self.use_se)
+                    num_c = int(self.config.decoder.n_channels * mult)
+                    cell = Cell(num_c, num_c, cell_type='normal_post', arch=arch, use_se=self.config.use_se)
 
                 post_process.append(cell)
 
         return post_process, mult
 
     def init_image_conditional(self, mult):
-        C_in = int(self.num_channels_dec * mult)
-        C_out = 1 if self.dataset == 'mnist' else 10 * self.num_mix_output
+        C_in = int(self.config.decoder.n_channels * mult)
+        C_out = 1 if self.config.dataset == 'mnist' else 10 * self.config.decoder.n_mix_output
         return nn.Sequential(nn.ELU(),
                              Conv2D(C_in, C_out, 3, padding=1, bias=True))
 
@@ -291,7 +292,7 @@ class AutoEncoder(nn.Module):
                     ftr = combiner_cells_enc[idx_dec - 1](combiner_cells_s[idx_dec - 1], s)
                     param = self.enc_sampler[idx_dec](ftr)
                     mu_q, log_sig_q = torch.chunk(param, 2, dim=1)
-                    dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q) if self.res_dist else Normal(mu_q, log_sig_q)
+                    dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q) if self.config.res_dist else Normal(mu_q, log_sig_q)
                     z, _ = dist.sample()
                     log_q_conv = dist.log_p(z)
                     # apply NF
@@ -376,11 +377,11 @@ class AutoEncoder(nn.Module):
         return logits
 
     def decoder_output(self, logits):
-        if self.dataset == 'mnist':
+        if self.config.dataset == 'mnist':
             return Bernoulli(logits=logits)
-        elif self.dataset in {'cifar10', 'celeba_64', 'celeba_256', 'imagenet_32', 'imagenet_64', 'ffhq',
-                              'lsun_bedroom_128', 'lsun_bedroom_256'}:
-            return DiscMixLogistic(logits, self.num_mix_output, num_bits=self.num_bits)
+        elif self.config.dataset in {'cifar10', 'celeba_64', 'celeba_256', 'imagenet_32', 'imagenet_64', 'ffhq',
+                                     'lsun_bedroom_128', 'lsun_bedroom_256'}:
+            return DiscMixLogistic(logits, self.config.decoder.n_mix_output, num_bits=self.config.n_bits)
         else:
             raise NotImplementedError
 

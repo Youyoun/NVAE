@@ -16,6 +16,7 @@ from torch.multiprocessing import Process
 
 import datasets
 import utils
+from configs import EncoderConfig, DecoderConfig, NVAEConfig
 from src import arch_types
 from src.model import AutoEncoder
 from src.thirdparty.adamax import Adamax
@@ -42,7 +43,14 @@ def main(args):
 
     arch_instance = arch_types.get_arch_cells(args.arch_instance)
 
-    model = AutoEncoder(args, writer, arch_instance)
+    enc_config = EncoderConfig(args.num_channels_enc, args.num_preprocess_blocks, args.num_preprocess_cells,
+                               args.num_cell_per_cond_enc)
+    dec_config = DecoderConfig(args.num_channels_dec, args.num_postprocess_blocks, args.num_postprocess_cells,
+                               args.num_cell_per_cond_dec)
+    config = NVAEConfig(args.num_latent_scales, args.num_groups_per_scale, args.num_latent_per_group,
+                        args.min_groups_per_scale, args.ada_groups, args.dataset, args.use_se, args.res_dist,
+                        args.num_nf, args.num_x_bits, enc_config, dec_config)
+    model = AutoEncoder(config, writer, arch_instance)
     model = model.cuda()
 
     logging.info('args = %s', args)
@@ -144,7 +152,7 @@ def main(args):
 
 
 def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters, writer, logging):
-    alpha_i = utils.kl_balancer_coeff(num_scales=model.num_latent_scales,
+    alpha_i = utils.kl_balancer_coeff(num_scales=model.config.n_latent_scales,
                                       groups_per_scale=model.groups_per_scale, fun='square')
     nelbo = utils.AvgrageMeter()
     model.train()
