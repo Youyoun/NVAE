@@ -16,7 +16,7 @@ from torch.multiprocessing import Process
 
 import datasets
 import utils
-from model import AutoEncoder
+from src.model import AutoEncoder
 from train import test, init_processes
 
 

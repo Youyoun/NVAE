@@ -12,7 +12,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 
 from lmdb_datasets import LMDBDataset
-from thirdparty.lsun import LSUN
+from src.thirdparty.lsun import LSUN
 
 
 class Binarize(object):

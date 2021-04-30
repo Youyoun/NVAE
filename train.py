@@ -16,9 +16,9 @@ from torch.multiprocessing import Process
 
 import datasets
 import utils
-import arch_types
-from model import AutoEncoder
-from thirdparty.adamax import Adamax
+from src import arch_types
+from src.model import AutoEncoder
+from src.thirdparty.adamax import Adamax
 
 
 def set_seed(seed):

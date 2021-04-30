@@ -12,8 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .utils import average_tensor
-from ..thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
-from ..thirdparty.swish import Swish as SwishFN
+from src.thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
+from src.thirdparty.swish import Swish as SwishFN
 
 BN_EPS = 1e-5
 SYNC_BN = True

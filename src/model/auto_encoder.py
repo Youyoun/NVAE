@@ -13,13 +13,11 @@ from torch.distributions.bernoulli import Bernoulli
 
 from configs import NVAEConfig
 from distributions import Normal, DiscMixLogistic
-from .cell import Cell, PairedCellAR
+from .cell import Cell, PairedCellAR, CHANNEL_MULT
 from .neural_ar_operations import ARConv2d
 from .neural_operations import EncCombinerCell, DecCombinerCell, Conv2D
 from .utils import get_input_size, groups_per_scale
-from ..thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
-
-CHANNEL_MULT = 2
+from src.thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 
 class AutoEncoder(nn.Module):

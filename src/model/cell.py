@@ -1,10 +1,11 @@
 import torch
 from torch import nn as nn
 
-from model.auto_encoder import CHANNEL_MULT
-from model.neural_ar_operations import ARInvertedResidual, MixLogCDFParam, ELUConv as ARELUConv, mix_log_cdf_flow
-from model.neural_operations import get_skip_connection, OPS, SE
-from model.utils import get_stride_for_cell_type
+from .neural_ar_operations import ARInvertedResidual, MixLogCDFParam, ELUConv as ARELUConv, mix_log_cdf_flow
+from .neural_operations import get_skip_connection, OPS, SE
+from .utils import get_stride_for_cell_type
+
+CHANNEL_MULT = 2
 
 
 class Cell(nn.Module):
