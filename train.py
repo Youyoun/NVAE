@@ -16,16 +16,21 @@ from torch.multiprocessing import Process
 
 import datasets
 import utils
+import arch_types
 from model import AutoEncoder
 from thirdparty.adamax import Adamax
 
 
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 def main(args):
     # ensures that weight initializations are all the same
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    set_seed(args.seed)
 
     logging = utils.Logger(args.global_rank, args.save)
     writer = utils.Writer(args.global_rank, args.save)
@@ -34,9 +39,8 @@ def main(args):
     train_queue, valid_queue, num_classes = datasets.get_loaders(args)
     args.num_total_iter = len(train_queue) * args.epochs
     warmup_iters = len(train_queue) * args.warmup_epochs
-    swa_start = len(train_queue) * (args.epochs - 1)
 
-    arch_instance = utils.get_arch_cells(args.arch_instance)
+    arch_instance = arch_types.get_arch_cells(args.arch_instance)
 
     model = AutoEncoder(args, writer, arch_instance)
     model = model.cuda()

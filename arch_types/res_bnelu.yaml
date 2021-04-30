@@ -1,0 +1,26 @@
+ar_nn:
+  - ''
+down_enc:
+  - res_bnelu
+  - res_bnelu
+down_pre:
+  - res_bnelu
+  - res_bnelu
+normal_dec:
+  - res_bnelu
+  - res_bnelu
+normal_enc:
+  - res_bnelu
+  - res_bnelu
+normal_post:
+  - res_bnelu
+  - res_bnelu
+normal_pre:
+  - res_bnelu
+  - res_bnelu
+up_dec:
+  - res_bnelu
+  - res_bnelu
+up_post:
+  - res_bnelu
+  - res_bnelu

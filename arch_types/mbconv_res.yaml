@@ -1,0 +1,22 @@
+ar_nn:
+  - ''
+down_enc:
+  - mconv_e6k5g0
+down_pre:
+  - mconv_e3k5g0
+normal_dec:
+  - res_bnswish
+  - res_bnswish
+normal_enc:
+  - mconv_e6k5g0
+normal_post:
+  - res_bnswish
+  - res_bnswish
+normal_pre:
+  - mconv_e3k5g0
+up_dec:
+  - res_bnswish
+  - res_bnswish
+up_post:
+  - res_bnswish
+  - res_bnswish

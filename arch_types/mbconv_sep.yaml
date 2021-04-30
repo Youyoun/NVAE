@@ -1,0 +1,18 @@
+ar_nn:
+  - ''
+down_enc:
+  - mconv_e6k5g0
+down_pre:
+  - mconv_e3k5g0
+normal_dec:
+  - mconv_e6k5g0
+normal_enc:
+  - mconv_e6k5g0
+normal_post:
+  - mconv_e3k5g0
+normal_pre:
+  - mconv_e3k5g0
+up_dec:
+  - mconv_e6k5g0
+up_post:
+  - mconv_e3k5g0

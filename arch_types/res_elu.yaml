@@ -1,0 +1,26 @@
+ar_nn:
+  - ''
+down_enc:
+  - res_elu
+  - res_elu
+down_pre:
+  - res_elu
+  - res_elu
+normal_dec:
+  - res_elu
+  - res_elu
+normal_enc:
+  - res_elu
+  - res_elu
+normal_post:
+  - res_elu
+  - res_elu
+normal_pre:
+  - res_elu
+  - res_elu
+up_dec:
+  - res_elu
+  - res_elu
+up_post:
+  - res_elu
+  - res_elu

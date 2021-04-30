@@ -1,0 +1,26 @@
+ar_nn:
+  - ''
+down_enc:
+  - res_bnswish
+  - res_bnswish
+down_pre:
+  - res_bnswish
+  - res_bnswish
+normal_dec:
+  - res_bnswish
+  - res_bnswish
+normal_enc:
+  - res_bnswish
+  - res_bnswish
+normal_post:
+  - res_bnswish
+  - res_bnswish
+normal_pre:
+  - res_bnswish
+  - res_bnswish
+up_dec:
+  - res_bnswish
+  - res_bnswish
+up_post:
+  - res_bnswish
+  - res_bnswish
