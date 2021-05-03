@@ -29,20 +29,7 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def main(args):
-    # ensures that weight initializations are all the same
-    set_seed(args.seed)
-
-    logging = utils.Logger(args.global_rank, args.save)
-    writer = utils.Writer(args.global_rank, args.save)
-
-    # Get data loaders.
-    train_queue, valid_queue, num_classes = datasets.get_loaders(args)
-    args.num_total_iter = len(train_queue) * args.epochs
-    warmup_iters = len(train_queue) * args.warmup_epochs
-
-    arch_instance = arch_types.get_arch_cells(args.arch_instance)
-
+def get_config(args):
     enc_config = EncoderConfig(args.num_channels_enc, args.num_preprocess_blocks, args.num_preprocess_cells,
                                args.num_cell_per_cond_enc)
     dec_config = DecoderConfig(args.num_channels_dec, args.num_postprocess_blocks, args.num_postprocess_cells,
@@ -50,243 +37,269 @@ def main(args):
     config = NVAEConfig(args.num_latent_scales, args.num_groups_per_scale, args.num_latent_per_group,
                         args.min_groups_per_scale, args.ada_groups, args.dataset, args.use_se, args.res_dist,
                         args.num_nf, args.num_x_bits, enc_config, dec_config)
-    model = AutoEncoder(config, writer, arch_instance)
-    model = model.cuda()
-
-    logging.info('args = %s', args)
-    logging.info('param size = %fM ', utils.count_parameters_in_M(model))
-    logging.info('groups per scale: %s, total_groups: %d', model.groups_per_scale, sum(model.groups_per_scale))
-
-    if args.fast_adamax:
-        # Fast adamax has the same functionality as torch.optim.Adamax, except it is faster.
-        cnn_optimizer = Adamax(model.parameters(), args.learning_rate,
-                               weight_decay=args.weight_decay, eps=1e-3)
-    else:
-        cnn_optimizer = torch.optim.Adamax(model.parameters(), args.learning_rate,
-                                           weight_decay=args.weight_decay, eps=1e-3)
-
-    cnn_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        cnn_optimizer, float(args.epochs - args.warmup_epochs - 1), eta_min=args.learning_rate_min)
-    grad_scalar = GradScaler(2 ** 10)
-
-    num_output = utils.num_output(args.dataset)
-    bpd_coeff = 1. / np.log(2.) / num_output
-
-    # if load
-    checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
-    if args.cont_training:
-        logging.info('loading the model.')
-        checkpoint = torch.load(checkpoint_file, map_location='cpu')
-        init_epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint['state_dict'])
-        model = model.cuda()
-        cnn_optimizer.load_state_dict(checkpoint['optimizer'])
-        grad_scalar.load_state_dict(checkpoint['grad_scalar'])
-        cnn_scheduler.load_state_dict(checkpoint['scheduler'])
-        global_step = checkpoint['global_step']
-    else:
-        global_step, init_epoch = 0, 0
-
-    for epoch in range(init_epoch, args.epochs):
-        # update lrs.
-        if args.distributed:
-            train_queue.sampler.set_epoch(global_step + args.seed)
-            valid_queue.sampler.set_epoch(0)
-
-        if epoch > args.warmup_epochs:
-            cnn_scheduler.step()
-
-        # Logging.
-        logging.info('epoch %d', epoch)
-
-        # Training.
-        train_nelbo, global_step = train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters,
-                                         writer, logging)
-        logging.info('train_nelbo %f', train_nelbo)
-        writer.add_scalar('train/nelbo', train_nelbo, global_step)
-
-        model.eval()
-        # generate samples less frequently
-        eval_freq = 1 if args.epochs <= 50 else 20
-        if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
-            with torch.no_grad():
-                num_samples = 16
-                n = int(np.floor(np.sqrt(num_samples)))
-                for t in [0.7, 0.8, 0.9, 1.0]:
-                    logits = model.sample(num_samples, t)
-                    output = model.decoder_output(logits)
-                    output_img = output.mean if isinstance(output,
-                                                           torch.distributions.bernoulli.Bernoulli) else output.sample(
-                        t)
-                    output_tiled = utils.tile_image(output_img, n)
-                    writer.add_image('generated_%0.1f' % t, output_tiled, global_step)
-
-            valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=10, args=args, logging=logging)
-            logging.info('valid_nelbo %f', valid_nelbo)
-            logging.info('valid neg log p %f', valid_neg_log_p)
-            logging.info('valid bpd elbo %f', valid_nelbo * bpd_coeff)
-            logging.info('valid bpd log p %f', valid_neg_log_p * bpd_coeff)
-            writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch)
-            writer.add_scalar('val/nelbo', valid_nelbo, epoch)
-            writer.add_scalar('val/bpd_log_p', valid_neg_log_p * bpd_coeff, epoch)
-            writer.add_scalar('val/bpd_elbo', valid_nelbo * bpd_coeff, epoch)
-
-        save_freq = int(np.ceil(args.epochs / 100))
-        if epoch % save_freq == 0 or epoch == (args.epochs - 1):
-            if args.global_rank == 0:
-                logging.info('saving the model.')
-                torch.save({'epoch': epoch + 1, 'state_dict': model.state_dict(),
-                            'optimizer': cnn_optimizer.state_dict(), 'global_step': global_step,
-                            'args': args, 'arch_instance': arch_instance, 'scheduler': cnn_scheduler.state_dict(),
-                            'grad_scalar': grad_scalar.state_dict()}, checkpoint_file)
-
-    # Final validation
-    valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=1000, args=args, logging=logging)
-    logging.info('final valid nelbo %f', valid_nelbo)
-    logging.info('final valid neg log p %f', valid_neg_log_p)
-    writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch + 1)
-    writer.add_scalar('val/nelbo', valid_nelbo, epoch + 1)
-    writer.add_scalar('val/bpd_log_p', valid_neg_log_p * bpd_coeff, epoch + 1)
-    writer.add_scalar('val/bpd_elbo', valid_nelbo * bpd_coeff, epoch + 1)
-    writer.close()
+    return config
 
 
-def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters, writer, logging):
-    alpha_i = utils.kl_balancer_coeff(num_scales=model.config.n_latent_scales,
-                                      groups_per_scale=model.groups_per_scale, fun='square')
-    nelbo = utils.AvgrageMeter()
-    model.train()
-    for step, x in enumerate(train_queue):
-        x = x[0] if len(x) > 1 else x
-        x = x.cuda()
+class Main:
+    def __init__(self, args):
+        set_seed(args.seed)
+        self.args = args
 
-        # change bit length
-        x = utils.pre_process(x, args.num_x_bits)
+        self.logging = utils.Logger(args.global_rank, args.save)
+        self.writer = utils.Writer(args.global_rank, args.save)
 
-        # warm-up lr
-        if global_step < warmup_iters:
-            lr = args.learning_rate * float(global_step) / warmup_iters
-            for param_group in cnn_optimizer.param_groups:
-                param_group['lr'] = lr
+        # Get data loaders.
+        self.train_queue, self.valid_queue, self.num_classes = datasets.get_loaders(args)
+        args.num_total_iter = len(self.train_queue) * args.epochs
+        self.warmup_iters = len(self.train_queue) * args.warmup_epochs
 
-        # sync parameters, it may not be necessary
-        if step % 100 == 0:
-            utils.average_params(model.parameters(), args.distributed)
+        self.arch_instance = arch_types.get_arch_cells(args.arch_instance)
 
-        cnn_optimizer.zero_grad()
-        with autocast():
-            logits, log_q, log_p, kl_all, kl_diag = model(x)
+        self.config = get_config(args)
+        self.model = AutoEncoder(self.config, self.writer, self.arch_instance)
+        self.model = self.model.cuda()
 
-            output = model.decoder_output(logits)
-            kl_coeff = utils.kl_coeff(global_step, args.kl_anneal_portion * args.num_total_iter,
-                                      args.kl_const_portion * args.num_total_iter, args.kl_const_coeff)
+        self.logging.info('args = %s', args)
+        self.logging.info('param size = %fM ', utils.count_parameters_in_M(self.model))
+        self.logging.info('groups per scale: %s, total_groups: %d', self.model.groups_per_scale,
+                          sum(self.model.groups_per_scale))
 
-            recon_loss = utils.reconstruction_loss(output, x, crop=model.crop_output)
-            balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
+        self.cnn_optimizer, self.cnn_scheduler = self.init_optim()
+        self.grad_scalar = GradScaler(2 ** 10)
 
-            nelbo_batch = recon_loss + balanced_kl
-            loss = torch.mean(nelbo_batch)
-            norm_loss = model.spectral_norm_parallel()
-            bn_loss = model.batchnorm_loss()
-            # get spectral regularization coefficient (lambda)
-            if args.weight_decay_norm_anneal:
-                assert args.weight_decay_norm_init > 0 and args.weight_decay_norm > 0, 'init and final wdn should be positive.'
-                wdn_coeff = (1. - kl_coeff) * np.log(args.weight_decay_norm_init) + kl_coeff * np.log(
-                    args.weight_decay_norm)
-                wdn_coeff = np.exp(wdn_coeff)
-            else:
-                wdn_coeff = args.weight_decay_norm
+        self.num_output = utils.num_output(args.dataset)
+        self.bpd_coeff = 1. / np.log(2.) / self.num_output
 
-            loss += norm_loss * wdn_coeff + bn_loss * wdn_coeff
+        # if load
+        self.checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
+        self.global_step, self.init_epoch = 0, 0
+        if self.args.cont_training:
+            self.load_model()
 
-        grad_scalar.scale(loss).backward()
-        utils.average_gradients(model.parameters(), args.distributed)
-        grad_scalar.step(cnn_optimizer)
-        grad_scalar.update()
-        nelbo.update(loss.data, 1)
+    def init_optim(self):
+        if self.args.fast_adamax:
+            # Fast adamax has the same functionality as torch.optim.Adamax, except it is faster.
+            optimizer = Adamax(self.model.parameters(), self.args.learning_rate, weight_decay=self.args.weight_decay,
+                               eps=1e-3)
+        else:
+            optimizer = torch.optim.Adamax(self.model.parameters(), self.args.learning_rate,
+                                           weight_decay=self.args.weight_decay, eps=1e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
+                                                               self.args.epochs - self.args.warmup_epochs - 1,
+                                                               eta_min=self.args.learning_rate_min)
+        return optimizer, scheduler
 
-        if (global_step + 1) % 100 == 0:
-            if (global_step + 1) % 1000 == 0:  # reduced frequency
-                n = int(np.floor(np.sqrt(x.size(0))))
-                x_img = x[:n * n]
-                output_img = output.mean if isinstance(output,
-                                                       torch.distributions.bernoulli.Bernoulli) else output.sample()
-                output_img = output_img[:n * n]
-                x_tiled = utils.tile_image(x_img, n)
-                output_tiled = utils.tile_image(output_img, n)
-                in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
-                writer.add_image('reconstruction', in_out_tiled, global_step)
+    def load_model(self):
+        self.logging.info('loading the model.')
+        checkpoint = torch.load(self.checkpoint_file, map_location='cpu')
+        self.init_epoch = checkpoint['epoch']
+        self.model.load_state_dict(checkpoint['state_dict'])
+        self.model = self.model.cuda()
+        self.cnn_optimizer.load_state_dict(checkpoint['optimizer'])
+        self.grad_scalar.load_state_dict(checkpoint['grad_scalar'])
+        self.cnn_scheduler.load_state_dict(checkpoint['scheduler'])
+        self.global_step = checkpoint['global_step']
 
-            # norm
-            writer.add_scalar('train/norm_loss', norm_loss, global_step)
-            writer.add_scalar('train/bn_loss', bn_loss, global_step)
-            writer.add_scalar('train/norm_coeff', wdn_coeff, global_step)
+    def run(self):
+        for epoch in range(self.init_epoch, self.args.epochs):
+            # update lrs.
+            if args.distributed:
+                self.train_queue.sampler.set_epoch(self.global_step + self.args.seed)
+                self.valid_queue.sampler.set_epoch(0)
 
-            utils.average_tensor(nelbo.avg, args.distributed)
-            logging.info('train %d %f', global_step, nelbo.avg)
-            writer.add_scalar('train/nelbo_avg', nelbo.avg, global_step)
-            writer.add_scalar('train/lr', cnn_optimizer.state_dict()[
-                'param_groups'][0]['lr'], global_step)
-            writer.add_scalar('train/nelbo_iter', loss, global_step)
-            writer.add_scalar('train/kl_iter', torch.mean(sum(kl_all)), global_step)
-            writer.add_scalar('train/recon_iter',
-                              torch.mean(utils.reconstruction_loss(output, x, crop=model.crop_output)), global_step)
-            writer.add_scalar('kl_coeff/coeff', kl_coeff, global_step)
-            total_active = 0
-            for i, kl_diag_i in enumerate(kl_diag):
-                utils.average_tensor(kl_diag_i, args.distributed)
-                num_active = torch.sum(kl_diag_i > 0.1).detach()
-                total_active += num_active
+            if epoch > self.args.warmup_epochs:
+                self.cnn_scheduler.step()
 
-                # kl_ceoff
-                writer.add_scalar('kl/active_%d' % i, num_active, global_step)
-                writer.add_scalar('kl_coeff/layer_%d' % i, kl_coeffs[i], global_step)
-                writer.add_scalar('kl_vals/layer_%d' % i, kl_vals[i], global_step)
-            writer.add_scalar('kl/total_active', total_active, global_step)
+            # Logging.
+            self.logging.info('epoch %d', epoch)
 
-        global_step += 1
+            # Training.
+            train_nelbo = self.train_one_epoch()
+            self.logging.info('train_nelbo %f', train_nelbo)
+            self.writer.add_scalar('train/nelbo', train_nelbo, self.global_step)
 
-    utils.average_tensor(nelbo.avg, args.distributed)
-    return nelbo.avg, global_step
+            self.model.eval()
+            # generate samples less frequently
+            eval_freq = 1 if self.args.epochs <= 50 else 20
+            if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
+                with torch.no_grad():
+                    num_samples = 16
+                    n = int(np.floor(np.sqrt(num_samples)))
+                    for t in [0.7, 0.8, 0.9, 1.0]:
+                        logits = self.model.sample(num_samples, t)
+                        output = self.model.decoder_output(logits)
+                        output_img = output.mean if isinstance(output,
+                                                               torch.distributions.bernoulli.Bernoulli) else output.sample(
+                            t)
+                        output_tiled = utils.tile_image(output_img, n)
+                        self.writer.add_image('generated_%0.1f' % t, output_tiled, self.global_step)
 
+                valid_neg_log_p, valid_nelbo = self.test(num_samples=10)
+                self.logging.info('valid_nelbo %f', valid_nelbo)
+                self.logging.info('valid neg log p %f', valid_neg_log_p)
+                self.logging.info('valid bpd elbo %f', valid_nelbo * self.bpd_coeff)
+                self.logging.info('valid bpd log p %f', valid_neg_log_p * self.bpd_coeff)
+                self.writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch)
+                self.writer.add_scalar('val/nelbo', valid_nelbo, epoch)
+                self.writer.add_scalar('val/bpd_log_p', valid_neg_log_p * self.bpd_coeff, epoch)
+                self.writer.add_scalar('val/bpd_elbo', valid_nelbo * self.bpd_coeff, epoch)
 
-def test(valid_queue, model, num_samples, args, logging):
-    if args.distributed:
-        dist.barrier()
-    nelbo_avg = utils.AvgrageMeter()
-    neg_log_p_avg = utils.AvgrageMeter()
-    model.eval()
-    for step, x in enumerate(valid_queue):
-        x = x[0] if len(x) > 1 else x
-        x = x.cuda()
+            save_freq = int(np.ceil(args.epochs / 100))
+            if epoch % save_freq == 0 or epoch == (args.epochs - 1):
+                if args.global_rank == 0:
+                    self.logging.info('saving the model.')
+                    torch.save({'epoch': epoch + 1, 'state_dict': self.model.state_dict(),
+                                'optimizer': self.cnn_optimizer.state_dict(), 'global_step': self.global_step,
+                                'args': self.args, 'arch_instance': self.arch_instance,
+                                'scheduler': self.cnn_scheduler.state_dict(),
+                                'grad_scalar': self.grad_scalar.state_dict()}, self.checkpoint_file)
 
-        # change bit length
-        x = utils.pre_process(x, args.num_x_bits)
+        # Final validation
+        valid_neg_log_p, valid_nelbo = self.test(num_samples=1000)
+        self.logging.info('final valid nelbo %f', valid_nelbo)
+        self.logging.info('final valid neg log p %f', valid_neg_log_p)
+        self.writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch + 1)
+        self.writer.add_scalar('val/nelbo', valid_nelbo, epoch + 1)
+        self.writer.add_scalar('val/bpd_log_p', valid_neg_log_p * self.bpd_coeff, epoch + 1)
+        self.writer.add_scalar('val/bpd_elbo', valid_nelbo * self.bpd_coeff, epoch + 1)
+        self.writer.close()
 
-        with torch.no_grad():
-            nelbo, log_iw = [], []
-            for k in range(num_samples):
-                logits, log_q, log_p, kl_all, _ = model(x)
-                output = model.decoder_output(logits)
-                recon_loss = utils.reconstruction_loss(output, x, crop=model.crop_output)
-                balanced_kl, _, _ = utils.kl_balancer(kl_all, kl_balance=False)
+    def train_one_epoch(self):
+        alpha_i = utils.kl_balancer_coeff(num_scales=self.model.config.n_latent_scales,
+                                          groups_per_scale=self.model.groups_per_scale, fun='square')
+        nelbo = utils.AvgrageMeter()
+        self.model.train()
+        for step, x in enumerate(self.train_queue):
+            x = x[0] if len(x) > 1 else x
+            x = x.cuda()
+
+            # change bit length
+            x = utils.pre_process(x, args.num_x_bits)
+
+            # warm-up lr
+            if self.global_step < self.warmup_iters:
+                lr = args.learning_rate * float(self.global_step) / self.warmup_iters
+                for param_group in self.cnn_optimizer.param_groups:
+                    param_group['lr'] = lr
+
+            # sync parameters, it may not be necessary
+            if step % 100 == 0:
+                utils.average_params(self.model.parameters(), args.distributed)
+
+            self.cnn_optimizer.zero_grad()
+            with autocast():
+                logits, log_q, log_p, kl_all, kl_diag = self.model(x)
+
+                output = self.model.decoder_output(logits)
+                kl_coeff = utils.kl_coeff(self.global_step, args.kl_anneal_portion * args.num_total_iter,
+                                          args.kl_const_portion * args.num_total_iter, args.kl_const_coeff)
+
+                recon_loss = utils.reconstruction_loss(output, x, crop=self.model.crop_output)
+                balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
+
                 nelbo_batch = recon_loss + balanced_kl
-                nelbo.append(nelbo_batch)
-                log_iw.append(utils.log_iw(output, x, log_q, log_p, crop=model.crop_output))
+                loss = torch.mean(nelbo_batch)
+                norm_loss = self.model.spectral_norm_parallel()
+                bn_loss = self.model.batchnorm_loss()
+                # get spectral regularization coefficient (lambda)
+                if self.args.weight_decay_norm_anneal:
+                    assert args.weight_decay_norm_init > 0 and args.weight_decay_norm > 0, 'init and final wdn should be positive.'
+                    wdn_coeff = (1. - kl_coeff) * np.log(args.weight_decay_norm_init) + kl_coeff * np.log(
+                        args.weight_decay_norm)
+                    wdn_coeff = np.exp(wdn_coeff)
+                else:
+                    wdn_coeff = args.weight_decay_norm
 
-            nelbo = torch.mean(torch.stack(nelbo, dim=1))
-            log_p = torch.mean(torch.logsumexp(torch.stack(log_iw, dim=1), dim=1) - np.log(num_samples))
+                loss += norm_loss * wdn_coeff + bn_loss * wdn_coeff
 
-        nelbo_avg.update(nelbo.data, x.size(0))
-        neg_log_p_avg.update(- log_p.data, x.size(0))
+            self.grad_scalar.scale(loss).backward()
+            utils.average_gradients(self.model.parameters(), args.distributed)
+            self.grad_scalar.step(self.cnn_optimizer)
+            self.grad_scalar.update()
+            nelbo.update(loss.data, 1)
 
-    utils.average_tensor(nelbo_avg.avg, args.distributed)
-    utils.average_tensor(neg_log_p_avg.avg, args.distributed)
-    if args.distributed:
-        # block to sync
-        dist.barrier()
-    logging.info('val, step: %d, NELBO: %f, neg Log p %f', step, nelbo_avg.avg, neg_log_p_avg.avg)
-    return neg_log_p_avg.avg, nelbo_avg.avg
+            if (self.global_step + 1) % 100 == 0:
+                if (self.global_step + 1) % 1000 == 0:  # reduced frequency
+                    n = int(np.floor(np.sqrt(x.size(0))))
+                    x_img = x[:n * n]
+                    output_img = output.mean if isinstance(output,
+                                                           torch.distributions.bernoulli.Bernoulli) else output.sample()
+                    output_img = output_img[:n * n]
+                    x_tiled = utils.tile_image(x_img, n)
+                    output_tiled = utils.tile_image(output_img, n)
+                    in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
+                    self.writer.add_image('reconstruction', in_out_tiled, self.global_step)
+
+                # norm
+                self.writer.add_scalar('train/norm_loss', norm_loss, self.global_step)
+                self.writer.add_scalar('train/bn_loss', bn_loss, self.global_step)
+                self.writer.add_scalar('train/norm_coeff', wdn_coeff, self.global_step)
+
+                utils.average_tensor(nelbo.avg, args.distributed)
+                self.logging.info('train %d %f', self.global_step, nelbo.avg)
+                self.writer.add_scalar('train/nelbo_avg', nelbo.avg, self.global_step)
+                self.writer.add_scalar('train/lr', self.cnn_optimizer.state_dict()[
+                    'param_groups'][0]['lr'], self.global_step)
+                self.writer.add_scalar('train/nelbo_iter', loss, self.global_step)
+                self.writer.add_scalar('train/kl_iter', torch.mean(sum(kl_all)), self.global_step)
+                self.writer.add_scalar('train/recon_iter',
+                                       torch.mean(utils.reconstruction_loss(output, x, crop=self.model.crop_output)),
+                                       self.global_step)
+                self.writer.add_scalar('kl_coeff/coeff', kl_coeff, self.global_step)
+                total_active = 0
+                for i, kl_diag_i in enumerate(kl_diag):
+                    utils.average_tensor(kl_diag_i, args.distributed)
+                    num_active = torch.sum(kl_diag_i > 0.1).detach()
+                    total_active += num_active
+
+                    # kl_ceoff
+                    self.writer.add_scalar('kl/active_%d' % i, num_active, self.global_step)
+                    self.writer.add_scalar('kl_coeff/layer_%d' % i, kl_coeffs[i], self.global_step)
+                    self.writer.add_scalar('kl_vals/layer_%d' % i, kl_vals[i], self.global_step)
+                self.writer.add_scalar('kl/total_active', total_active, self.global_step)
+
+            self.global_step += 1
+
+        utils.average_tensor(nelbo.avg, args.distributed)
+        return nelbo.avg
+
+    def test(self, num_samples):
+        if args.distributed:
+            dist.barrier()
+        nelbo_avg = utils.AvgrageMeter()
+        neg_log_p_avg = utils.AvgrageMeter()
+        self.model.eval()
+        for step, x in enumerate(self.valid_queue):
+            x = x[0] if len(x) > 1 else x
+            x = x.cuda()
+
+            # change bit length
+            x = utils.pre_process(x, args.num_x_bits)
+
+            with torch.no_grad():
+                nelbo, log_iw = [], []
+                for k in range(num_samples):
+                    logits, log_q, log_p, kl_all, _ = self.model(x)
+                    output = self.model.decoder_output(logits)
+                    recon_loss = utils.reconstruction_loss(output, x, crop=self.model.crop_output)
+                    balanced_kl, _, _ = utils.kl_balancer(kl_all, kl_balance=False)
+                    nelbo_batch = recon_loss + balanced_kl
+                    nelbo.append(nelbo_batch)
+                    log_iw.append(utils.log_iw(output, x, log_q, log_p, crop=self.model.crop_output))
+
+                nelbo = torch.mean(torch.stack(nelbo, dim=1))
+                log_p = torch.mean(torch.logsumexp(torch.stack(log_iw, dim=1), dim=1) - np.log(num_samples))
+
+            nelbo_avg.update(nelbo.data, x.size(0))
+            neg_log_p_avg.update(- log_p.data, x.size(0))
+
+        utils.average_tensor(nelbo_avg.avg, args.distributed)
+        utils.average_tensor(neg_log_p_avg.avg, args.distributed)
+        if args.distributed:
+            # block to sync
+            dist.barrier()
+        self.logging.info('val, step: %d, NELBO: %f, neg Log p %f', step, nelbo_avg.avg, neg_log_p_avg.avg)
+        return neg_log_p_avg.avg, nelbo_avg.avg
 
 
 def init_processes(rank, size, fn, args):
@@ -295,7 +308,8 @@ def init_processes(rank, size, fn, args):
     os.environ['MASTER_PORT'] = '6020'
     torch.cuda.set_device(args.local_rank)
     dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=size)
-    fn(args)
+    fn = fn(args)
+    fn.run()
     cleanup()
 
 
@@ -419,7 +433,7 @@ if __name__ == '__main__':
             global_size = args.num_proc_node * args.num_process_per_node
             args.global_rank = global_rank
             print('Node rank %d, local proc %d, global proc %d' % (args.node_rank, rank, global_rank))
-            p = Process(target=init_processes, args=(global_rank, global_size, main, args))
+            p = Process(target=init_processes, args=(global_rank, global_size, Main, args))
             p.start()
             processes.append(p)
 
@@ -429,4 +443,4 @@ if __name__ == '__main__':
         # for debugging
         print('starting in debug mode')
         args.distributed = True
-        init_processes(0, size, main, args)
+        init_processes(0, size, Main, args)
