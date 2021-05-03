@@ -76,7 +76,7 @@ class Main:
 
         # Get data loaders.
         self.train_queue, self.valid_queue, self.num_classes = datasets.get_loaders(args)
-        args.num_total_iter = len(self.train_queue) * args.epochs
+        self.num_total_iter = len(self.train_queue) * args.epochs
         self.warmup_iters = len(self.train_queue) * args.warmup_epochs
 
         self.arch_instance = arch_types.get_arch_cells(args.arch_instance)
@@ -106,8 +106,7 @@ class Main:
         if fast_adamax:
             # Fast adamax has the same functionality as torch.optim.Adamax, except it is faster.
             optimizer = Adamax(self.model.parameters(), self.optim_conf.learning_rate,
-                               weight_decay=self.optim_conf.weight_decay,
-                               eps=1e-3)
+                               weight_decay=self.optim_conf.weight_decay, eps=1e-3)
         else:
             optimizer = torch.optim.Adamax(self.model.parameters(), self.optim_conf.learning_rate,
                                            weight_decay=self.optim_conf.weight_decay, eps=1e-3)
@@ -128,14 +127,9 @@ class Main:
         self.global_step = checkpoint['global_step']
 
     def run(self):
+        epoch = 0
         for epoch in range(self.init_epoch, self.optim_conf.epochs):
-            # update lrs.
-            if args.distributed:
-                self.train_queue.sampler.set_epoch(self.global_step + self.seed)
-                self.valid_queue.sampler.set_epoch(0)
-
-            if epoch > self.optim_conf.warmup_epochs:
-                self.cnn_scheduler.step()
+            self.update_lrs(epoch)
 
             # Logging.
             self.logging.info('epoch %d', epoch)
@@ -145,51 +139,18 @@ class Main:
             self.logging.info('train_nelbo %f', train_nelbo)
             self.writer.add_scalar('train/nelbo', train_nelbo, self.global_step)
 
-            self.model.eval()
-            # generate samples less frequently
-            eval_freq = 1 if self.optim_conf.epochs <= 50 else 20
-            if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
-                with torch.no_grad():
-                    num_samples = 16
-                    n = int(np.floor(np.sqrt(num_samples)))
-                    for t in [0.7, 0.8, 0.9, 1.0]:
-                        logits = self.model.sample(num_samples, t)
-                        output = self.model.decoder_output(logits)
-                        output_img = output.mean if isinstance(output,
-                                                               torch.distributions.bernoulli.Bernoulli) else output.sample(
-                            t)
-                        output_tiled = utils.tile_image(output_img, n)
-                        self.writer.add_image('generated_%0.1f' % t, output_tiled, self.global_step)
+            self.eval(epoch)
+            self.save_model(epoch)
 
-                valid_neg_log_p, valid_nelbo = self.test(num_samples=10)
-                self.logging.info('valid_nelbo %f', valid_nelbo)
-                self.logging.info('valid neg log p %f', valid_neg_log_p)
-                self.logging.info('valid bpd elbo %f', valid_nelbo * self.bpd_coeff)
-                self.logging.info('valid bpd log p %f', valid_neg_log_p * self.bpd_coeff)
-                self.writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch)
-                self.writer.add_scalar('val/nelbo', valid_nelbo, epoch)
-                self.writer.add_scalar('val/bpd_log_p', valid_neg_log_p * self.bpd_coeff, epoch)
-                self.writer.add_scalar('val/bpd_elbo', valid_nelbo * self.bpd_coeff, epoch)
+        self.final_eval(epoch)
 
-            save_freq = int(np.ceil(args.epochs / 100))
-            if epoch % save_freq == 0 or epoch == (args.epochs - 1):
-                if args.global_rank == 0:
-                    self.logging.info('saving the model.')
-                    torch.save({'epoch': epoch + 1, 'state_dict': self.model.state_dict(),
-                                'optimizer': self.cnn_optimizer.state_dict(), 'global_step': self.global_step,
-                                'arch_instance': self.arch_instance,
-                                'scheduler': self.cnn_scheduler.state_dict(),
-                                'grad_scalar': self.grad_scalar.state_dict()}, self.checkpoint_file)
+    def update_lrs(self, epoch):
+        if self.distributed_conf.distributed:
+            self.train_queue.sampler.set_epoch(self.global_step + self.seed)
+            self.valid_queue.sampler.set_epoch(0)
 
-        # Final validation
-        valid_neg_log_p, valid_nelbo = self.test(num_samples=1000)
-        self.logging.info('final valid nelbo %f', valid_nelbo)
-        self.logging.info('final valid neg log p %f', valid_neg_log_p)
-        self.writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch + 1)
-        self.writer.add_scalar('val/nelbo', valid_nelbo, epoch + 1)
-        self.writer.add_scalar('val/bpd_log_p', valid_neg_log_p * self.bpd_coeff, epoch + 1)
-        self.writer.add_scalar('val/bpd_elbo', valid_nelbo * self.bpd_coeff, epoch + 1)
-        self.writer.close()
+        if epoch > self.optim_conf.warmup_epochs:
+            self.cnn_scheduler.step()
 
     def train_one_epoch(self):
         alpha_i = utils.kl_balancer_coeff(num_scales=self.model.config.latent.n_latent_scales,
@@ -218,8 +179,8 @@ class Main:
                 logits, log_q, log_p, kl_all, kl_diag = self.model(x)
 
                 output = self.model.decoder_output(logits)
-                kl_coeff = utils.kl_coeff(self.global_step, args.kl_anneal_portion * args.num_total_iter,
-                                          args.kl_const_portion * args.num_total_iter, args.kl_const_coeff)
+                kl_coeff = utils.kl_coeff(self.global_step, args.kl_anneal_portion * self.num_total_iter,
+                                          args.kl_const_portion * self.num_total_iter, args.kl_const_coeff)
 
                 recon_loss = utils.reconstruction_loss(output, x, crop=self.model.crop_output)
                 balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
@@ -289,6 +250,55 @@ class Main:
 
         utils.average_tensor(nelbo.avg, args.distributed)
         return nelbo.avg
+
+    def eval(self, epoch):
+        self.model.eval()
+        # generate samples less frequently
+        eval_freq = 1 if self.optim_conf.epochs <= 50 else 20
+        if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
+            with torch.no_grad():
+                num_samples = 16
+                n = int(np.floor(np.sqrt(num_samples)))
+                for t in [0.7, 0.8, 0.9, 1.0]:
+                    logits = self.model.sample(num_samples, t)
+                    output = self.model.decoder_output(logits)
+                    output_img = output.mean if isinstance(output,
+                                                           torch.distributions.bernoulli.Bernoulli) else output.sample(
+                        t)
+                    output_tiled = utils.tile_image(output_img, n)
+                    self.writer.add_image('generated_%0.1f' % t, output_tiled, self.global_step)
+
+            valid_neg_log_p, valid_nelbo = self.test(num_samples=10)
+            self.logging.info('valid_nelbo %f', valid_nelbo)
+            self.logging.info('valid neg log p %f', valid_neg_log_p)
+            self.logging.info('valid bpd elbo %f', valid_nelbo * self.bpd_coeff)
+            self.logging.info('valid bpd log p %f', valid_neg_log_p * self.bpd_coeff)
+            self.writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch)
+            self.writer.add_scalar('val/nelbo', valid_nelbo, epoch)
+            self.writer.add_scalar('val/bpd_log_p', valid_neg_log_p * self.bpd_coeff, epoch)
+            self.writer.add_scalar('val/bpd_elbo', valid_nelbo * self.bpd_coeff, epoch)
+
+    def save_model(self, epoch):
+        save_freq = int(np.ceil(self.optim_conf.epochs / 100))
+        if epoch % save_freq == 0 or epoch == (self.optim_conf.epochs - 1):
+            if args.global_rank == 0:
+                self.logging.info('saving the model.')
+                torch.save({'epoch': epoch + 1, 'state_dict': self.model.state_dict(),
+                            'optimizer': self.cnn_optimizer.state_dict(), 'global_step': self.global_step,
+                            'arch_instance': self.arch_instance,
+                            'scheduler': self.cnn_scheduler.state_dict(),
+                            'grad_scalar': self.grad_scalar.state_dict()}, self.checkpoint_file)
+
+    def final_eval(self, epoch):
+        # Final validation
+        valid_neg_log_p, valid_nelbo = self.test(num_samples=1000)
+        self.logging.info('final valid nelbo %f', valid_nelbo)
+        self.logging.info('final valid neg log p %f', valid_neg_log_p)
+        self.writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch + 1)
+        self.writer.add_scalar('val/nelbo', valid_nelbo, epoch + 1)
+        self.writer.add_scalar('val/bpd_log_p', valid_neg_log_p * self.bpd_coeff, epoch + 1)
+        self.writer.add_scalar('val/bpd_elbo', valid_nelbo * self.bpd_coeff, epoch + 1)
+        self.writer.close()
 
     def test(self, num_samples):
         if args.distributed:
