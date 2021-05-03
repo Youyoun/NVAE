@@ -16,7 +16,8 @@ from torch.multiprocessing import Process
 
 import datasets
 import utils
-from configs import EncoderConfig, DecoderConfig, NVAEConfig
+from configs import EncoderConfig, DecoderConfig, NVAEConfig, DataConfig, NormalizingFlowParameters, \
+    LatentSpaceConfig, OptimizationParameters, KLAnnealingParameters, DistributedConfig
 from src import arch_types
 from src.model import AutoEncoder
 from src.thirdparty.adamax import Adamax
@@ -29,21 +30,46 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def get_config(args):
-    enc_config = EncoderConfig(args.num_channels_enc, args.num_preprocess_blocks, args.num_preprocess_cells,
-                               args.num_cell_per_cond_enc)
-    dec_config = DecoderConfig(args.num_channels_dec, args.num_postprocess_blocks, args.num_postprocess_cells,
-                               args.num_cell_per_cond_dec)
-    config = NVAEConfig(args.num_latent_scales, args.num_groups_per_scale, args.num_latent_per_group,
-                        args.min_groups_per_scale, args.ada_groups, args.dataset, args.use_se, args.res_dist,
-                        args.num_nf, args.num_x_bits, enc_config, dec_config)
-    return config
+def get_model_conf(args):
+    enc = EncoderConfig(args.num_channels_enc, args.num_preprocess_blocks, args.num_preprocess_cells,
+                        args.num_cell_per_cond_enc)
+    dec = DecoderConfig(args.num_channels_dec, args.num_postprocess_blocks, args.num_postprocess_cells,
+                        args.num_cell_per_cond_dec)
+    norm_flow = NormalizingFlowParameters(args.num_nf, args.num_x_bits)
+    latent = LatentSpaceConfig(args.num_latent_scales, args.num_groups_per_scale, args.num_latent_per_group,
+                               args.min_groups_per_scale, args.ada_groups)
+    model = NVAEConfig(args.use_se, args.res_dist, norm_flow, latent, enc, dec)
+    return model
+
+
+def get_optim_conf(args):
+    return OptimizationParameters(args.batch_size, args.epochs, args.warmup_epochs, args.learning_rate,
+                                  args.learning_rate_min, args.weight_decay, args.weight_decay_norm,
+                                  args.weight_decay_norm_init, args.weight_decay_norm_anneal)
+
+
+def get_kl_conf(args):
+    return KLAnnealingParameters(args.kl_anneal_portion, args.kl_const_portion, args.kl_const_coeff)
+
+
+def get_distributed_conf(args):
+    return DistributedConfig(args.distributed, args.num_proc_node, args.node_rank, args.local_rank, args.global_rank,
+                             args.num_process_per_node, args.master_address)
+
+
+def get_data_conf(args):
+    return DataConfig(args.dataset, args.data, args.root, args.save)
 
 
 class Main:
     def __init__(self, args):
-        set_seed(args.seed)
-        self.args = args
+        self.seed = args.seed
+        set_seed(self.seed)
+
+        self.dataset_conf = get_data_conf(args)
+        self.optim_conf = get_optim_conf(args)
+        self.kl_anneal_conf = get_kl_conf(args)
+        self.distributed_conf = get_distributed_conf(args)
 
         self.logging = utils.Logger(args.global_rank, args.save)
         self.writer = utils.Writer(args.global_rank, args.save)
@@ -55,8 +81,8 @@ class Main:
 
         self.arch_instance = arch_types.get_arch_cells(args.arch_instance)
 
-        self.config = get_config(args)
-        self.model = AutoEncoder(self.config, self.writer, self.arch_instance)
+        self.config = get_model_conf(args)
+        self.model = AutoEncoder(self.config, self.dataset_conf.dataset, self.writer, self.arch_instance)
         self.model = self.model.cuda()
 
         self.logging.info('args = %s', args)
@@ -67,26 +93,27 @@ class Main:
         self.cnn_optimizer, self.cnn_scheduler = self.init_optim()
         self.grad_scalar = GradScaler(2 ** 10)
 
-        self.num_output = utils.num_output(args.dataset)
+        self.num_output = utils.num_output(self.dataset_conf.dataset)
         self.bpd_coeff = 1. / np.log(2.) / self.num_output
 
         # if load
         self.checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
         self.global_step, self.init_epoch = 0, 0
-        if self.args.cont_training:
+        if args.cont_training:
             self.load_model()
 
-    def init_optim(self):
-        if self.args.fast_adamax:
+    def init_optim(self, fast_adamax=True):
+        if fast_adamax:
             # Fast adamax has the same functionality as torch.optim.Adamax, except it is faster.
-            optimizer = Adamax(self.model.parameters(), self.args.learning_rate, weight_decay=self.args.weight_decay,
+            optimizer = Adamax(self.model.parameters(), self.optim_conf.learning_rate,
+                               weight_decay=self.optim_conf.weight_decay,
                                eps=1e-3)
         else:
-            optimizer = torch.optim.Adamax(self.model.parameters(), self.args.learning_rate,
-                                           weight_decay=self.args.weight_decay, eps=1e-3)
+            optimizer = torch.optim.Adamax(self.model.parameters(), self.optim_conf.learning_rate,
+                                           weight_decay=self.optim_conf.weight_decay, eps=1e-3)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
-                                                               self.args.epochs - self.args.warmup_epochs - 1,
-                                                               eta_min=self.args.learning_rate_min)
+                                                               self.optim_conf.epochs - self.optim_conf.warmup_epochs - 1,
+                                                               eta_min=self.optim_conf.learning_rate_min)
         return optimizer, scheduler
 
     def load_model(self):
@@ -101,13 +128,13 @@ class Main:
         self.global_step = checkpoint['global_step']
 
     def run(self):
-        for epoch in range(self.init_epoch, self.args.epochs):
+        for epoch in range(self.init_epoch, self.optim_conf.epochs):
             # update lrs.
             if args.distributed:
-                self.train_queue.sampler.set_epoch(self.global_step + self.args.seed)
+                self.train_queue.sampler.set_epoch(self.global_step + self.seed)
                 self.valid_queue.sampler.set_epoch(0)
 
-            if epoch > self.args.warmup_epochs:
+            if epoch > self.optim_conf.warmup_epochs:
                 self.cnn_scheduler.step()
 
             # Logging.
@@ -120,7 +147,7 @@ class Main:
 
             self.model.eval()
             # generate samples less frequently
-            eval_freq = 1 if self.args.epochs <= 50 else 20
+            eval_freq = 1 if self.optim_conf.epochs <= 50 else 20
             if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
                 with torch.no_grad():
                     num_samples = 16
@@ -150,7 +177,7 @@ class Main:
                     self.logging.info('saving the model.')
                     torch.save({'epoch': epoch + 1, 'state_dict': self.model.state_dict(),
                                 'optimizer': self.cnn_optimizer.state_dict(), 'global_step': self.global_step,
-                                'args': self.args, 'arch_instance': self.arch_instance,
+                                'arch_instance': self.arch_instance,
                                 'scheduler': self.cnn_scheduler.state_dict(),
                                 'grad_scalar': self.grad_scalar.state_dict()}, self.checkpoint_file)
 
@@ -165,7 +192,7 @@ class Main:
         self.writer.close()
 
     def train_one_epoch(self):
-        alpha_i = utils.kl_balancer_coeff(num_scales=self.model.config.n_latent_scales,
+        alpha_i = utils.kl_balancer_coeff(num_scales=self.model.config.latent.n_latent_scales,
                                           groups_per_scale=self.model.groups_per_scale, fun='square')
         nelbo = utils.AvgrageMeter()
         self.model.train()
@@ -184,7 +211,7 @@ class Main:
 
             # sync parameters, it may not be necessary
             if step % 100 == 0:
-                utils.average_params(self.model.parameters(), args.distributed)
+                utils.average_params(self.model.parameters(), self.distributed_conf.distributed)
 
             self.cnn_optimizer.zero_grad()
             with autocast():
@@ -202,7 +229,7 @@ class Main:
                 norm_loss = self.model.spectral_norm_parallel()
                 bn_loss = self.model.batchnorm_loss()
                 # get spectral regularization coefficient (lambda)
-                if self.args.weight_decay_norm_anneal:
+                if self.optim_conf.weight_decay_norm_anneal:
                     assert args.weight_decay_norm_init > 0 and args.weight_decay_norm > 0, 'init and final wdn should be positive.'
                     wdn_coeff = (1. - kl_coeff) * np.log(args.weight_decay_norm_init) + kl_coeff * np.log(
                         args.weight_decay_norm)
