@@ -28,7 +28,7 @@ class AutoEncoder(nn.Module):
         self.config = model_config
         self.dataset = dataset
         self.crop_output = self.dataset == "mnist"
-        self.config.norm_flow
+
         self.groups_per_scale = groups_per_scale(self.config.latent.n_latent_scales,
                                                  self.config.latent.n_groups_per_scale,
                                                  self.config.latent.ada_groups,
