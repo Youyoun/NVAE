@@ -129,28 +129,26 @@ class Main:
     def run(self):
         epoch = 0
         for epoch in range(self.init_epoch, self.optim_conf.epochs):
-            self.update_lrs(epoch)
-
-            # Logging.
             self.logging.info('epoch %d', epoch)
-
-            # Training.
-            train_nelbo = self.train_one_epoch()
-            self.logging.info('train_nelbo %f', train_nelbo)
-            self.writer.add_scalar('train/nelbo', train_nelbo, self.global_step)
-
+            self.update_lrs(epoch)
+            self.train_one_epoch()
             self.eval(epoch)
             self.save_model(epoch)
 
         self.final_eval(epoch)
 
     def update_lrs(self, epoch):
-        if self.distributed_conf.distributed:
+        if self.distributed_conf.is_distributed:
             self.train_queue.sampler.set_epoch(self.global_step + self.seed)
             self.valid_queue.sampler.set_epoch(0)
 
         if epoch > self.optim_conf.warmup_epochs:
             self.cnn_scheduler.step()
+
+    def warmup_lr(self):
+        lr = self.optim_conf.learning_rate * float(self.global_step) / self.warmup_iters
+        for param_group in self.cnn_optimizer.param_groups:
+            param_group['lr'] = lr
 
     def train_one_epoch(self):
         alpha_i = utils.kl_balancer_coeff(num_scales=self.model.config.latent.n_latent_scales,
@@ -166,42 +164,48 @@ class Main:
 
             # warm-up lr
             if self.global_step < self.warmup_iters:
-                lr = args.learning_rate * float(self.global_step) / self.warmup_iters
-                for param_group in self.cnn_optimizer.param_groups:
-                    param_group['lr'] = lr
+                self.warmup_lr()
 
             # sync parameters, it may not be necessary
             if step % 100 == 0:
-                utils.average_params(self.model.parameters(), self.distributed_conf.distributed)
+                utils.average_params(self.model.parameters(), self.distributed_conf.is_distributed)
 
             self.cnn_optimizer.zero_grad()
-            with autocast():
+            with autocast():  # For mixed precision (float32 & float 16)
+
+                # Get output of model
                 logits, log_q, log_p, kl_all, kl_diag = self.model(x)
-
                 output = self.model.decoder_output(logits)
-                kl_coeff = utils.kl_coeff(self.global_step, args.kl_anneal_portion * self.num_total_iter,
-                                          args.kl_const_portion * self.num_total_iter, args.kl_const_coeff)
 
+                # Compute reconstruction loss
                 recon_loss = utils.reconstruction_loss(output, x, crop=self.model.crop_output)
+
+                # KL coeff serves as scaling for kl loss ?
+                kl_coeff = utils.kl_coeff(self.global_step, self.kl_anneal_conf.kl_anneal_portion * self.num_total_iter,
+                                          self.kl_anneal_conf.kl_const_portion * self.num_total_iter,
+                                          self.kl_anneal_conf.kl_const_coeff)
                 balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
 
+                # Compute loss
                 nelbo_batch = recon_loss + balanced_kl
                 loss = torch.mean(nelbo_batch)
                 norm_loss = self.model.spectral_norm_parallel()
                 bn_loss = self.model.batchnorm_loss()
+
                 # get spectral regularization coefficient (lambda)
                 if self.optim_conf.weight_decay_norm_anneal:
                     assert args.weight_decay_norm_init > 0 and args.weight_decay_norm > 0, 'init and final wdn should be positive.'
                     wdn_coeff = (1. - kl_coeff) * np.log(args.weight_decay_norm_init) + kl_coeff * np.log(
-                        args.weight_decay_norm)
+                        self.optim_conf.weight_decay_norm)
                     wdn_coeff = np.exp(wdn_coeff)
                 else:
-                    wdn_coeff = args.weight_decay_norm
-
+                    wdn_coeff = self.optim_conf.weight_decay_norm
+                # Final loss with spect regularization
                 loss += norm_loss * wdn_coeff + bn_loss * wdn_coeff
 
+            # Compute backward pass
             self.grad_scalar.scale(loss).backward()
-            utils.average_gradients(self.model.parameters(), args.distributed)
+            utils.average_gradients(self.model.parameters(), self.distributed_conf.is_distributed)
             self.grad_scalar.step(self.cnn_optimizer)
             self.grad_scalar.update()
             nelbo.update(loss.data, 1)
@@ -249,12 +253,13 @@ class Main:
             self.global_step += 1
 
         utils.average_tensor(nelbo.avg, args.distributed)
-        return nelbo.avg
+        self.logging.info('train_nelbo %f', nelbo.avg)
+        self.writer.add_scalar('train/nelbo', nelbo.avg, self.global_step)
 
     def eval(self, epoch):
         self.model.eval()
         # generate samples less frequently
-        eval_freq = 1 if self.optim_conf.epochs <= 50 else 20
+        eval_freq = 1 if self.optim_conf.epochs <= 100 else 20
         if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
             with torch.no_grad():
                 num_samples = 16

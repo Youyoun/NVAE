@@ -21,12 +21,15 @@ from tensorboardX import SummaryWriter
 class AvgrageMeter(object):
 
     def __init__(self):
+        self.cnt = 0
+        self.sum = 0
+        self.avg = 0
         self.reset()
 
     def reset(self):
-        self.avg = 0
-        self.sum = 0
         self.cnt = 0
+        self.sum = 0
+        self.avg = 0
 
     def update(self, val, n=1):
         self.sum += val * n
@@ -240,7 +243,7 @@ def reconstruction_loss(decoder, x, crop=False):
     from distributions import DiscMixLogistic
 
     recon = decoder.log_prob(x)
-    if crop:
+    if crop:  # Crop only if mnist ?
         recon = recon[:, :, 2:30, 2:30]
 
     if isinstance(decoder, DiscMixLogistic):

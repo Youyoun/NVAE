@@ -73,7 +73,7 @@ class KLAnnealingParameters:
 
 @dataclass
 class DistributedConfig:
-    distributed: bool
+    is_distributed: bool
     num_proc_node: int
     node_rank: int
     local_rank: int
